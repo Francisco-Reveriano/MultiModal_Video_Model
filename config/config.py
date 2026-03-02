@@ -33,7 +33,7 @@ MIN_FRAMES = 17
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 TRIGGER_TOKEN = "ohwx"
 CAPTION_CONTEXT = """
-These videos are of a top colombian influencer and instagram model.
+Pomeranian dog - 
 """
 PER_VIDEO_CONTEXT = {}
 
