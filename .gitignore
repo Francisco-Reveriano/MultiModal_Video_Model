@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+data/raw/*
+data/processed/*
+output/*
+*.mp4
+wandb/
+training_log.txt
+finetrainers/
+!.gitkeep
+
+.DS_Store
+.idea/

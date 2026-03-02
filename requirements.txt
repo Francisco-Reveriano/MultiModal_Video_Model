@@ -1,0 +1,31 @@
+# Video processing
+opencv-python-headless
+imageio
+imageio-ffmpeg
+ffmpeg-python
+pillow
+tqdm
+
+# Utilities
+matplotlib
+matplotlib-inline
+
+# ML / Training
+torch>=2.4.0
+torchvision
+diffusers
+transformers
+accelerate
+peft
+bitsandbytes
+sentencepiece
+ftfy
+
+# Captioning
+google-genai
+
+# Utilities
+python-dotenv
+matplotlib
+numpy
+pandas
