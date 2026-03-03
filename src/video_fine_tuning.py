@@ -4,7 +4,6 @@
 # ===== Code Cell 0 =====
 # ── Standard library & path setup ──────────────────────────────────────────────
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -27,6 +26,11 @@ from config.config import (
     DATASET_DIR,          # directory containing videos.txt + prompts.txt
     FINETRAINERS_REPO,    # GitHub URL for the finetrainers training framework
     FINETRAINERS_TAG,     # pinned git tag to ensure reproducible builds
+    INFERENCE_HEIGHT,     # video height for post-training validation
+    INFERENCE_NUM_FRAMES, # number of frames for post-training validation
+    INFERENCE_STEPS,      # diffusion steps for post-training validation
+    INFERENCE_WIDTH,      # video width for post-training validation
+    LORA_STRENGTH,        # LoRA adapter scaling for inference
     LR_SCHEDULER,         # learning-rate schedule type (e.g. "cosine")
     MAX_GRAD_NORM,        # gradient clipping threshold
     MIN_FRAMES,           # minimum number of frames a video must have
@@ -183,20 +187,14 @@ assert is_valid, "Dataset validation failed — fix errors above before training
 # are provided, but you should adjust them based on your dataset size, GPU budget,
 # and desired quality.
 
-TRAIN_EPOCHS = 1             # One full pass over the dataset
-LORA_RANK = 64               # Rank of the LoRA decomposition (higher = more capacity)
+TRAIN_EPOCHS = 280           # 280 epochs, ~630 optimizer steps with grad_accum=4
+LORA_RANK = 128               # Rank of the LoRA decomposition (higher = more capacity)
 LORA_ALPHA = 64              # LoRA scaling factor (often set equal to rank)
-LEARNING_RATE = 2e-4         # Peak learning rate after warmup
+LEARNING_RATE = 5e-5         # Peak learning rate after warmup
 BATCH_SIZE = 1               # Micro-batch size per GPU (1 is typical for video)
-GRAD_ACCUM_STEPS = 1         # Gradient accumulation steps (effective batch scaled by GPUs)
-WARMUP_STEPS = 100           # Linear warmup steps before the LR scheduler takes over
-CHECKPOINTING_STEPS = 500    # Save a checkpoint every N steps
-VALIDATION_STEPS = 100       # Generate validation video every N training steps
-VALIDATION_PROMPT = """
-A Pomeranian sprints through a park between trees and benches, weaving playfully. Dynamic tracking shot with smooth steadycam, quick but clean parallax, light motion blur, sharp focus on the dog. Sun rays through leaves, cinematic contrast, realistic fur simulation and paw impacts on grass. 4K, 60fps for smooth motion, 6 seconds. No text, no logos.
-"""
-NUM_VALIDATION_VIDEOS = 1
-VALIDATION_FRAME_RATE = 25
+GRAD_ACCUM_STEPS = 4         # Gradient accumulation steps (effective batch = 4 per optimizer step)
+WARMUP_STEPS = 50            # ~5% of total steps for faster ramp-up
+CHECKPOINTING_STEPS = 200    # Save a checkpoint every ~100 epochs (200 optimizer steps)
 
 # ── Compute effective batch size for transparency ─────────────────────────────────
 # effective_batch = num_gpus * micro_batch * gradient_accumulation
@@ -211,7 +209,7 @@ print(f"Learning rate   : {LEARNING_RATE}")
 print(f"Batch size      : {BATCH_SIZE} per GPU x {num_gpus} GPUs x {GRAD_ACCUM_STEPS} accum = {effective_batch} effective")
 print(f"Warmup steps    : {WARMUP_STEPS}")
 print(f"Checkpoint every: {CHECKPOINTING_STEPS} steps")
-print(f"Validation every: {VALIDATION_STEPS} steps")
+print(f"LR scheduler    : {LR_SCHEDULER}")
 
 # ===== Code Cell 5 =====
 import json
@@ -397,10 +395,6 @@ fi
     --allow_tf32 \\
     --checkpointing_steps {CHECKPOINTING_STEPS} \\
     --checkpointing_limit 3 \\
-    --validation_prompts "{VALIDATION_PROMPT.strip()}" \\
-    --validation_steps {VALIDATION_STEPS} \\
-    --num_validation_videos {NUM_VALIDATION_VIDEOS} \\
-    --validation_frame_rate {VALIDATION_FRAME_RATE} \\
     --output_dir "{output_dir}" \\
     --report_to wandb \\
 {fp8_flags}
@@ -424,19 +418,6 @@ print(f"{'='*60}\n")
 # stdout and stderr are merged so all logs appear in order.
 # Every line is printed to the notebook AND written to the log file.
 start = time.time()
-copied_validation_videos = set()
-
-
-def sync_validation_videos() -> None:
-    output_path = Path(output_dir)
-    for pattern in ("validation-*.mp4", "final-*.mp4"):
-        for src_video in output_path.rglob(pattern):
-            if src_video in copied_validation_videos:
-                continue
-            dst_video = midpoint_results_dir / src_video.name
-            shutil.copy2(src_video, dst_video)
-            copied_validation_videos.add(src_video)
-            print(f"\nSaved midpoint validation video: {dst_video}")
 
 with open(log_path, "w") as log_file:
     proc = subprocess.Popen(
@@ -449,9 +430,7 @@ with open(log_path, "w") as log_file:
     for line in proc.stdout:
         print(line, end="")
         log_file.write(line)
-        sync_validation_videos()
     proc.wait()
-    sync_validation_videos()
 
 elapsed = time.time() - start
 
@@ -463,7 +442,52 @@ else:
     print(f"\n✅ Training complete in {elapsed/60:.1f} min")
     print(f"Log: {log_path}")
 
-# ===== Code Cell 7 =====
+# ===== Code Cell 7: Post-training validation =====
+# Generate a validation video using the trained LoRA weights.
+# Training ran as a subprocess, so GPU memory is fully freed.
+if proc.returncode == 0:
+    from diffusers import HunyuanVideoPipeline
+    from diffusers.utils import export_to_video
+
+    print(f"\n{'='*60}")
+    print("POST-TRAINING VALIDATION")
+    print(f"{'='*60}\n")
+
+    torch.cuda.empty_cache()
+    validation_prompt = f"{TRIGGER_TOKEN} Pomeranian dog running in a sunny park, cinematic video"
+
+    print(f"Loading pipeline from {MODEL_ID}...")
+    pipe = HunyuanVideoPipeline.from_pretrained(
+        MODEL_ID,
+        torch_dtype=torch.bfloat16,
+        token=HF_TOKEN,
+    )
+    pipe.to("cuda")
+    pipe.vae.enable_tiling()
+
+    print(f"Loading LoRA weights from {output_dir}...")
+    pipe.load_lora_weights(output_dir)
+    pipe.fuse_lora(lora_scale=LORA_STRENGTH)
+
+    print(f"Generating {INFERENCE_NUM_FRAMES} frames at {INFERENCE_WIDTH}x{INFERENCE_HEIGHT}...")
+    val_start = time.time()
+    video_frames = pipe(
+        prompt=validation_prompt,
+        num_frames=INFERENCE_NUM_FRAMES,
+        height=INFERENCE_HEIGHT,
+        width=INFERENCE_WIDTH,
+        num_inference_steps=INFERENCE_STEPS,
+    ).frames[0]
+    val_elapsed = time.time() - val_start
+
+    val_video_path = midpoint_results_dir / "post_training_validation.mp4"
+    export_to_video(video_frames, str(val_video_path), fps=15)
+    print(f"\n✅ Validation video saved: {val_video_path} ({val_elapsed/60:.1f} min)")
+
+    del pipe, video_frames
+    torch.cuda.empty_cache()
+
+# ===== Code Cell 8: Summary =====
 output_path = Path(output_dir)
 
 checkpoints = sorted(output_path.glob("checkpoint-*"))
@@ -490,4 +514,4 @@ if Path(log_path).exists():
         print(f"   {line.rstrip()}")
 
 print(f"\nTotal training time: {elapsed/60:.1f} min ({elapsed/3600:.1f} hr)")
-print(f"Midpoint validation outputs: {midpoint_results_dir}")
+print(f"Validation outputs: {midpoint_results_dir}")

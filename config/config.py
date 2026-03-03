@@ -15,6 +15,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RAW_VIDEO_DIR = PROJECT_ROOT / "data" / "raw"
 DATASET_DIR = PROJECT_ROOT / "data" / "processed"
 VIDEO_DIR = DATASET_DIR / "videos"
+DATASET_AUG_DIR = PROJECT_ROOT / "data" / "processed_aug"
+VIDEO_AUG_DIR = DATASET_AUG_DIR / "videos"
 OUTPUT_DIR = PROJECT_ROOT / "output" / "lora_weights"
 
 # =============================================================
@@ -26,6 +28,14 @@ TARGET_FPS = 24
 MAX_DURATION_SEC = 5
 MIN_DURATION_SEC = 1
 MIN_FRAMES = 17
+
+# =============================================================
+# Augmentation defaults
+# =============================================================
+TEMPORAL_CROP_DURATION_SEC = 3.0
+TEMPORAL_CROPS_PER_VIDEO = 2
+ENABLE_HORIZONTAL_FLIP = True
+CAPTION_AUG_RULE_VARIANTS = 2
 
 # =============================================================
 # Captioning
@@ -46,25 +56,22 @@ FINETRAINERS_REPO = "https://github.com/huggingface/finetrainers.git"
 FINETRAINERS_TAG = "v0.0.1"
 
 TRAIN_STEPS = 1500
-LORA_RANK = 64
+LORA_RANK = 128
 LORA_ALPHA = 64
-LEARNING_RATE = 2e-4
-LR_SCHEDULER = "constant_with_warmup"
-WARMUP_STEPS = 100
+LEARNING_RATE = 5e-5
+LR_SCHEDULER = "cosine"
+WARMUP_STEPS = 30
 BATCH_SIZE = 1
 GRAD_ACCUM_STEPS = 4
-CAPTION_DROPOUT = 0.05
-CHECKPOINTING_STEPS = 500
-MAX_GRAD_NORM = 1.0
+CAPTION_DROPOUT = 0.1
+CHECKPOINTING_STEPS = 200
+MAX_GRAD_NORM = 0.5
 SEED = 42
 
 # =============================================================
 # Inference
 # =============================================================
-INFERENCE_PROMPT = (
-    f"{TRIGGER_TOKEN} Pomerian dog"
-    "in a thong bikini, realistic style, cinematic lighting, 4K quality."
-)
+INFERENCE_PROMPT = f"{TRIGGER_TOKEN} Pomeranian dog running in a sunny park, cinematic video"
 LORA_STRENGTH = 0.6
 INFERENCE_HEIGHT = 480
 INFERENCE_WIDTH = 832
