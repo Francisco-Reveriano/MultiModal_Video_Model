@@ -1,6 +1,7 @@
 import os
 import subprocess
 import tempfile
+from typing import Optional
 
 import torch
 
@@ -58,10 +59,31 @@ def setup_finetrainers(
     req_file = os.path.join(install_dir, "requirements.txt")
     if os.path.exists(req_file):
         print("Installing finetrainers requirements...")
-        subprocess.run(
-            ["pip", "install", "-q", "-r", req_file],
-            check=True,
-        )
+        install_req_file = req_file
+        tmp_req_file = None
+        with open(req_file, "r", encoding="utf-8") as f:
+            req_lines = f.readlines()
+        filtered_req_lines = [
+            line
+            for line in req_lines
+            if not line.strip().lower().startswith("torchao")
+        ]
+        if len(filtered_req_lines) != len(req_lines):
+            print("Skipping torchao install due to diffusers compatibility.")
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".txt", delete=False, encoding="utf-8"
+            ) as tmp_file:
+                tmp_file.writelines(filtered_req_lines)
+                tmp_req_file = tmp_file.name
+            install_req_file = tmp_req_file
+        try:
+            subprocess.run(
+                ["pip", "install", "-q", "-r", install_req_file],
+                check=True,
+            )
+        finally:
+            if tmp_req_file and os.path.exists(tmp_req_file):
+                os.remove(tmp_req_file)
 
     train_script = os.path.join(install_dir, "train.py")
     assert os.path.exists(train_script), f"train.py not found at {train_script}"
@@ -78,7 +100,8 @@ def build_training_script(
     resolution_buckets: str,
     use_fp8: bool,
     mixed_precision: str = "bf16",
-    train_steps: int = 1500,
+    train_epochs: int = 1,
+    train_steps: Optional[int] = None,
     lora_rank: int = 64,
     lora_alpha: int = 64,
     learning_rate: float = 2e-4,
@@ -90,8 +113,16 @@ def build_training_script(
     checkpointing_steps: int = 500,
     max_grad_norm: float = 1.0,
     seed: int = 42,
+    validation_prompt: str = "",
+    validation_steps: int = 100,
+    num_validation_videos: int = 1,
+    validation_frame_rate: int = 25,
+    wandb_project: str = "",
+    wandb_entity: str = "",
 ) -> str:
     """Build the training shell script. Returns the script content."""
+    project_root = os.path.dirname(os.path.dirname(train_script_path))
+    venv_accelerate = os.path.join(project_root, ".venv", "bin", "accelerate")
     fp8_flags = ""
     if use_fp8:
         fp8_flags = (
@@ -100,16 +131,44 @@ def build_training_script(
             "    --layerwise_upcasting_skip_modules_pattern "
             'patch_embed pos_embed x_embedder context_embedder "^proj_in$" "^proj_out$" norm'
         )
+    validation_flags = ""
+    if validation_prompt:
+        validation_flags = (
+            "    --validation_prompts "
+            f'"{validation_prompt}" \\\n'
+            f"    --validation_steps {validation_steps} \\\n"
+            f"    --num_validation_videos {num_validation_videos} \\\n"
+            f"    --validation_frame_rate {validation_frame_rate} \\\n"
+        )
+    train_duration_flag = f"    --train_epochs {train_epochs} \\\n"
+    if train_steps is not None:
+        train_duration_flag = f"    --train_steps {train_steps} \\\n"
 
     script = f"""#!/bin/bash
 set -e
 
-export WANDB_MODE=offline
+export WANDB_MODE=online
 export NCCL_P2P_DISABLE=1
 export TORCH_NCCL_ENABLE_MONITORING=0
 export FINETRAINERS_LOG_LEVEL=DEBUG
+export WANDB_PROJECT="{wandb_project}"
+export WANDB_ENTITY="{wandb_entity}"
 
-accelerate launch \\
+# Some environments inject local HTTP proxies that block Hugging Face model downloads.
+# Set BYPASS_HF_PROXY=0 to keep existing proxy behavior.
+if [ "${{BYPASS_HF_PROXY:-1}}" = "1" ]; then
+    unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+    export NO_PROXY="${{NO_PROXY}},huggingface.co,cdn-lfs.huggingface.co,hf.co"
+    export no_proxy="${{no_proxy}},huggingface.co,cdn-lfs.huggingface.co,hf.co"
+fi
+
+if [ -x "{venv_accelerate}" ]; then
+    ACCELERATE_BIN="{venv_accelerate}"
+else
+    ACCELERATE_BIN="accelerate"
+fi
+
+"$ACCELERATE_BIN" launch \\
     --mixed_precision={mixed_precision} \\
     --gpu_ids=0 \\
     {train_script_path} \\
@@ -125,7 +184,7 @@ accelerate launch \\
     --training_type lora \\
     --seed {seed} \\
     --batch_size {batch_size} \\
-    --train_steps {train_steps} \\
+{train_duration_flag}
     --rank {lora_rank} \\
     --lora_alpha {lora_alpha} \\
     --target_modules to_q to_k to_v to_out.0 \\
@@ -142,8 +201,9 @@ accelerate launch \\
     --allow_tf32 \\
     --checkpointing_steps {checkpointing_steps} \\
     --checkpointing_limit 3 \\
+{validation_flags}
     --output_dir "{output_dir}" \\
-    --report_to none \\
+    --report_to wandb \\
     {fp8_flags}
 """
     return script
@@ -164,7 +224,18 @@ def launch_training(
     os.makedirs(output_dir, exist_ok=True)
 
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-    os.environ["WANDB_MODE"] = "offline"
+    wandb_api_key = os.getenv("WANDB_API_KEY", "")
+    if not wandb_api_key:
+        raise ValueError("WANDB_API_KEY is required for online wandb logging.")
+
+    os.environ["WANDB_API_KEY"] = wandb_api_key
+    os.environ["WANDB_MODE"] = "online"
+    wandb_project = kwargs.get("wandb_project", "")
+    wandb_entity = kwargs.get("wandb_entity", "")
+    if wandb_project:
+        os.environ["WANDB_PROJECT"] = wandb_project
+    if wandb_entity:
+        os.environ["WANDB_ENTITY"] = wandb_entity
     os.environ["NCCL_P2P_DISABLE"] = "1"
     os.environ["TORCH_NCCL_ENABLE_MONITORING"] = "0"
     os.environ["FINETRAINERS_LOG_LEVEL"] = "DEBUG"

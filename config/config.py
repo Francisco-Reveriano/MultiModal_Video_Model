@@ -30,10 +30,10 @@ MIN_FRAMES = 17
 # =============================================================
 # Captioning
 # =============================================================
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GOOGLE_API_STUDIO_KEY", "")
 TRIGGER_TOKEN = "ohwx"
 CAPTION_CONTEXT = """
-Pomeranian dog - 
+Video includes a Pomeranian dog - 
 """
 PER_VIDEO_CONTEXT = {}
 
@@ -62,7 +62,7 @@ SEED = 42
 # Inference
 # =============================================================
 INFERENCE_PROMPT = (
-    f"{TRIGGER_TOKEN} A sexy colombian latin girl dancing to spanish music "
+    f"{TRIGGER_TOKEN} Pomerian dog"
     "in a thong bikini, realistic style, cinematic lighting, 4K quality."
 )
 LORA_STRENGTH = 0.6
