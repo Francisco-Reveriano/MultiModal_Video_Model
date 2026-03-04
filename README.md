@@ -11,6 +11,8 @@ flowchart LR
     subgraph phase1 [Phase 1 -- Data Preparation]
         A[Analyze] --> B[Process]
         B --> D[Preview]
+        B --> BA[Augment]
+        BA --> D
         D --> E[Caption]
         E --> F[Validate]
     end
@@ -18,10 +20,10 @@ flowchart LR
     subgraph phase2 [Phase 2 -- Training]
         G[finetrainers + accelerate]
         G --> H[LoRA Adapter]
-        H --> V[Validation Videos]
     end
 
     subgraph phase3 [Phase 3 -- Inference]
+        H --> PTV[Post-Training Validation]
         I[Base Model + LoRA] --> J[Generated Video]
     end
 
@@ -29,9 +31,9 @@ flowchart LR
     H --> I
 ```
 
-**Phase 1** transforms raw phone/camera footage into a training-ready dataset: normalized resolution, frame rate, duration, and text captions.
+**Phase 1** transforms raw phone/camera footage into a training-ready dataset: normalized resolution, frame rate, duration, and text captions. An optional augmentation step (notebook 02A) creates temporal crops and horizontal flips to expand the dataset.
 
-**Phase 2** fine-tunes the HunyuanVideo transformer with LoRA using the [finetrainers](https://github.com/huggingface/finetrainers) library, producing a lightweight adapter (~100 MB) instead of modifying the full 13B-parameter model. Periodic validation videos are generated during training to monitor quality. Metrics are logged to [Weights & Biases](https://wandb.ai).
+**Phase 2** fine-tunes the HunyuanVideo transformer with LoRA using the [finetrainers](https://github.com/huggingface/finetrainers) library, producing a lightweight adapter (~100 MB) instead of modifying the full 13B-parameter model. Metrics are logged to [Weights & Biases](https://wandb.ai). After training completes, a single validation video is generated automatically.
 
 **Phase 3** loads the base HunyuanVideo model, applies the LoRA adapter, and generates new videos from text prompts containing the trigger token.
 
@@ -49,9 +51,11 @@ flowchart TD
             AN[analyze.py]
             PR[process.py]
             PV[preview.py]
+            AUG[augment.py]
         end
         subgraph cap_mod [captioning/]
             GE[gemini.py]
+            CA[augment.py]
         end
         subgraph train_mod [training/]
             TR[train.py]
@@ -73,8 +77,11 @@ flowchart TD
     end
 
     subgraph notebooks_mod [Notebooks/]
+        NB1[01. Test.ipynb]
         NB2[02. Video Process Pipeline.ipynb]
+        NB2A[02A. Augmentation Pipeline.ipynb]
         NB3[03. Video Fine-Tuning.ipynb]
+        NB4[04. New Weights.ipynb]
     end
 
     CFG --> data_mod
@@ -88,8 +95,10 @@ flowchart TD
     SGN --> infer_mod
     NB2 --> data_mod
     NB2 --> cap_mod
-    NB2 --> train_mod
+    NB2A --> data_mod
+    NB2A --> cap_mod
     NB3 --> train_mod
+    NB4 --> infer_mod
     VFT --> train_mod
     NOHUP --> VFT
 ```
@@ -106,9 +115,11 @@ MultiModal_Video_Model/
 │   ├── data/
 │   │   ├── analyze.py         # Video metadata extraction (resolution, fps, brightness)
 │   │   ├── process.py         # Resize, crop, re-encode, trim via FFmpeg
+│   │   ├── augment.py         # Temporal crop + horizontal flip augmentation
 │   │   └── preview.py         # Thumbnail grid visualization
 │   ├── captioning/
-│   │   └── gemini.py          # Auto-captioning with Gemini 2.5 Flash
+│   │   ├── gemini.py          # Auto-captioning with Gemini 2.5 Flash
+│   │   └── augment.py         # Rule-based caption augmentation (flip rules, style variants)
 │   ├── training/
 │   │   ├── train.py           # finetrainers setup, training script generation, launch
 │   │   ├── validate.py        # Dataset integrity checks before training
@@ -123,14 +134,17 @@ MultiModal_Video_Model/
 │       ├── run_video_fine_tuning_nohup.sh  # Background launcher via nohup
 │       └── README.md          # Launcher usage docs
 ├── Notebooks/
-│   ├── 01. Test.ipynb         # Quick model loading / generation test
-│   ├── 02. Video Process Pipeline.ipynb  # Interactive data preparation walkthrough
-│   └── 03. Video Fine-Tuning.ipynb       # Interactive fine-tuning with W&B + validation
+│   ├── 01. Test.ipynb                            # Quick model loading / generation test
+│   ├── 02. Video Process Pipeline.ipynb          # Data preparation (no augmentation)
+│   ├── 02A. Video Process Augmentation Pipeline.ipynb  # Data preparation with augmentation
+│   ├── 03. Video Fine-Tuning.ipynb               # Fine-tuning with W&B logging
+│   └── 04. New Weights.ipynb                     # Inference / validation with trained weights
 ├── finetrainers/              # Cloned finetrainers repo (not committed)
 ├── data/
 │   ├── raw/                   # Input: raw video files (not committed)
 │   ├── processed/             # Output: processed videos, captions.json, videos.txt, prompts.txt
-│   └── Midpoint_Results/      # Validation videos from training runs (not committed)
+│   ├── processed_aug/         # Output: augmented videos + captions (not committed)
+│   └── Midpoint_Results/      # Post-training validation videos (not committed)
 ├── output/
 │   ├── lora_weights/          # Trained LoRA checkpoints (not committed)
 │   └── nohup_logs/            # Background launcher logs and PID files (not committed)
@@ -185,10 +199,17 @@ Place raw video files (`.mp4`, `.mov`, `.avi`) into `data/raw/`.
 
 ### Option 1: Notebooks (recommended for exploration)
 
-- `Notebooks/02. Video Process Pipeline.ipynb` -- data preparation with inline previews.
-- `Notebooks/03. Video Fine-Tuning.ipynb` -- fine-tuning with W&B logging and validation videos.
+| Notebook | Purpose |
+|---|---|
+| `01. Test.ipynb` | Quick model loading and generation test |
+| `02. Video Process Pipeline.ipynb` | Data preparation without augmentation |
+| `02A. Video Process Augmentation Pipeline.ipynb` | Data preparation with temporal crops + flips |
+| `03. Video Fine-Tuning.ipynb` | LoRA fine-tuning with W&B logging |
+| `04. New Weights.ipynb` | Inference / validation with trained LoRA weights |
 
 Run cells sequentially. Each pipeline step is a separate section with summary statistics.
+
+For best training results, use notebook **02A** (with augmentation) to expand a small dataset before training. This multiplies each base video into up to 6 variants via temporal crops and horizontal flips.
 
 ### Option 2: CLI Scripts
 
@@ -214,12 +235,16 @@ python -m scripts.train --steps 2000 --rank 128 --lr 1e-4 --batch-size 1
 python -m scripts.generate --lora-strength 0.8 --steps 50 --seed 123
 ```
 
+> **Note:** The CLI `prepare_dataset.py` does not include augmentation. Use notebook **02A** for augmented dataset preparation.
+
 ### Option 3: Python API
 
 ```python
 from src.data.analyze import analyze_all
 from src.data.process import process_all
+from src.data.augment import augment_processed_videos
 from src.captioning.gemini import caption_all
+from src.captioning.augment import caption_augmented_videos
 from src.training.validate import validate_dataset
 from src.inference.generate import load_pipeline, generate_video
 ```
@@ -271,6 +296,26 @@ Extracts the mid-frame from each video, sends it to Gemini 2.5 Flash with a stru
 - `videos.txt` -- one video path per line
 - `prompts.txt` -- one caption per line (same order)
 
+### 4A. Augment Videos (`src/data/augment.py`)
+
+Creates augmented video variants from the processed base videos:
+
+- **Temporal crops** -- 2 clips per video, 3 seconds each, evenly spaced across the original duration
+- **Horizontal flip** -- mirrors the video left-to-right
+- **Combined** -- flipped versions of each temporal crop
+
+Per base video, this produces up to **6 variants**: 1 base + 2 temporal crops + 1 flipped base + 2 flipped crops. Output goes to `data/processed_aug/videos/`.
+
+### 4B. Augment Captions (`src/captioning/augment.py`)
+
+Applies rule-based transformations on top of the Gemini-generated base captions:
+
+- **Flip rules** -- swaps "left" / "right" in captions for horizontally-flipped videos
+- **Temporal crop descriptor** -- appends `"Short action-focused crop from the original sequence."`
+- **Style variants** -- cycles through 3 cinematic style suffixes, selected deterministically by filename hash
+
+Outputs: `captions_augmented.json`, `videos.txt`, `prompts.txt` in `data/processed_aug/`.
+
 ### 5. Validate (`src/training/validate.py`)
 
 Pre-training integrity checks: resolution matches target, frame count >= 17, captions are non-empty and non-failed, video files are non-trivially sized, and `videos.txt` / `prompts.txt` line counts match.
@@ -280,22 +325,28 @@ Pre-training integrity checks: resolution matches target, frame count >= 17, cap
 Clones [finetrainers](https://github.com/huggingface/finetrainers) v0.0.1, generates a training shell script, and launches it via `accelerate`. Key settings:
 
 - LoRA on transformer attention layers (`to_q`, `to_k`, `to_v`, `to_out.0`)
-- Rank 64, alpha 64
-- AdamW optimizer, LR 2e-4 with cosine warmup
-- bf16 mixed precision, gradient checkpointing
-- 1 epoch (one full pass over the dataset) by default
-- Batch size 1, gradient accumulation 1
-- 5% caption dropout for classifier-free guidance
-- Periodic validation videos every N steps (`--validation_steps`), saved to `data/Midpoint_Results/`
+- Rank 128, alpha 64
+- AdamW optimizer, LR 5e-5 with cosine annealing schedule
+- 50-step linear warmup
+- bf16 mixed precision, gradient checkpointing, TF32 enabled
+- 280 epochs (~630 optimizer steps with 9 videos)
+- Batch size 1, gradient accumulation 4 (effective batch size 4)
+- 10% caption dropout for classifier-free guidance
+- Gradient clipping at 0.5
+- Checkpoints saved every 200 steps (max 3 kept)
 - Online logging to [Weights & Biases](https://wandb.ai) (`--report_to wandb`)
 
-### 7. Inference (`src/inference/generate.py`)
+After training completes, a **post-training validation** step automatically loads the base model, applies the trained LoRA adapter (strength 0.6), and generates a validation video saved to `data/Midpoint_Results/post_training_validation.mp4`.
 
-Loads the base HunyuanVideo model, applies the trained LoRA adapter at a configurable strength (default 0.6), enables VAE tiling and model CPU offload for memory efficiency, then generates video from a text prompt.
+### 7. Inference (`src/inference/generate.py`, `Notebooks/04. New Weights.ipynb`)
+
+Loads the base HunyuanVideo model, applies the trained LoRA adapter at a configurable strength (default 0.6), enables VAE tiling, then generates video from a text prompt. Notebook 04 provides an interactive workflow with automatic GPU detection, quantization selection, and LoRA weight discovery.
 
 ## Configuration
 
 All settings live in `config/config.py` and read secrets from `.env` via `python-dotenv`.
+
+### Video Processing
 
 | Parameter | Default | Description |
 |---|---|---|
@@ -305,14 +356,42 @@ All settings live in `config/config.py` and read secrets from `.env` via `python
 | `MAX_DURATION_SEC` | 5 | Max clip length |
 | `MIN_FRAMES` | 17 | Minimum frame count for a valid clip |
 | `TRIGGER_TOKEN` | `ohwx` | Subject identifier token |
-| `TRAIN_EPOCHS` | 1 | Training epochs (one full dataset pass) |
-| `VALIDATION_STEPS` | 100 | Generate a validation video every N training steps |
-| `LORA_RANK` | 64 | LoRA rank |
-| `LEARNING_RATE` | 2e-4 | Optimizer learning rate |
-| `CAPTION_DROPOUT` | 0.05 | Probability of dropping caption during training |
+
+### Augmentation
+
+| Parameter | Default | Description |
+|---|---|---|
+| `TEMPORAL_CROP_DURATION_SEC` | 3.0 | Duration of each temporal crop (seconds) |
+| `TEMPORAL_CROPS_PER_VIDEO` | 2 | Number of temporal crops per base video |
+| `ENABLE_HORIZONTAL_FLIP` | True | Apply horizontal flip augmentation |
+| `CAPTION_AUG_RULE_VARIANTS` | 2 | Number of caption style variants to cycle |
+
+### Training
+
+| Parameter | Default | Description |
+|---|---|---|
+| `TRAIN_EPOCHS` | 280 | Number of training epochs |
+| `LORA_RANK` | 128 | LoRA rank (decomposition dimension) |
+| `LORA_ALPHA` | 64 | LoRA scaling factor |
+| `LEARNING_RATE` | 5e-5 | Peak learning rate after warmup |
+| `LR_SCHEDULER` | `cosine` | Learning rate schedule |
+| `WARMUP_STEPS` | 50 | Linear warmup steps |
+| `BATCH_SIZE` | 1 | Micro-batch size per GPU |
+| `GRAD_ACCUM_STEPS` | 4 | Gradient accumulation steps |
+| `CAPTION_DROPOUT` | 0.1 | Caption drop probability (classifier-free guidance) |
+| `MAX_GRAD_NORM` | 0.5 | Gradient clipping threshold |
+| `CHECKPOINTING_STEPS` | 200 | Save checkpoint every N optimizer steps |
+| `SEED` | 42 | Random seed |
+
+### Inference
+
+| Parameter | Default | Description |
+|---|---|---|
 | `LORA_STRENGTH` | 0.6 | Adapter weight at inference |
-| `WANDB_PROJECT` | `multimodal-video-model` | W&B project name |
-| `WANDB_ENTITY` | (set in notebook) | W&B team or username |
+| `INFERENCE_HEIGHT` | 480 | Generated video height |
+| `INFERENCE_WIDTH` | 832 | Generated video width |
+| `INFERENCE_NUM_FRAMES` | 61 | Number of generated frames |
+| `INFERENCE_STEPS` | 30 | Diffusion inference steps |
 
 ## Testing
 
